@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+#from math import comb
 import os
 import argparse
 import pandas as pd
@@ -50,14 +51,15 @@ def variant_processing(libraryid,resultsdir):
     MTvariantpipeline: A simple variant calling and annotation pipeline for mitochondrial DNA variants.
     """
     print("Starting variant processing...")
-
+    tumor = libraryid.split('.')[0]
+    normal = libraryid.split('.')[1]
     # Overlap between MuTect and MTvariantpipeline
     # Read in MTvariantpipeline result
-    MTvarfile = pd.read_csv(resultsdir + "/MTvariant_results/" + libraryid + ".maf", sep = "\t", comment='#', low_memory=False)
+    MTvarfile = pd.read_csv(resultsdir + "/MTvariant_results/" + tumor + ".maf", sep = "\t", low_memory=False)
 
     # Read in MuTect result
-    mutectfile = pd.read_csv(resultsdir + "/MuTect2_results/" + libraryid + ".maf", sep = "\t", header=1, low_memory=False)
-    saveasthis = resultsdir + "/" + libraryid + ".fillout"
+    mutectfile = pd.read_csv(resultsdir + "/MuTect2_results/MAF." + libraryid + ".maf", sep = ",", low_memory=False)
+    saveasthis = resultsdir + "/FILLOUT/" + libraryid + ".fillout"
 
     # Filter out variants falling in the repeat regions of 302-315, 513-525, and 3105-3109 (black listed regions)
     # Make sure End_Position is also not in the region
@@ -72,16 +74,45 @@ def variant_processing(libraryid,resultsdir):
 
     # Output the overlap as final maf file
     combinedfile = pd.merge(mutectfile, MTvarfile, how='inner', on=['Chromosome','Start_Position','Reference_Allele',
-        'Tumor_Seq_Allele2','Variant_Classification','Hugo_Symbol','EXON'])
+        'Tumor_Seq_Allele2','Variant_Classification','Variant_Type','Hugo_Symbol','EXON'])
 
     # Fix INDELs in the same position i.e. A:11866:AC and A:11866:ACC
+    aux = combinedfile.loc[combinedfile['Variant_Type'] == 'INS'].groupby('Start_Position').count()['Hugo_Symbol'].reset_index()
+    positions = list(aux['Start_Position'].loc[aux['Hugo_Symbol'] > 1])
+    variants = list(combinedfile['ShortVariantID_y'].loc[(combinedfile['Start_Position'].isin(positions)) & (combinedfile['Variant_Type'] == 'INS')])
+    if len(positions) != 0:
+        dff = combinedfile.loc[combinedfile['ShortVariantID_y'].isin(variants)]
+        # Create an auxuliary file only with the last rows to keep: keep unique positions with the highest TumorVAF
+        dffaux = dff.sort_values(by='TumorVAF_y', ascending = False)
+        dffaux = dffaux.drop_duplicates('Start_Position', keep = 'first')
+        for i in positions:
+            vals = dff[['t_alt_count_y', 't_alt_count_x']].loc[dff['Start_Position'] == i].sum(axis = 0).reset_index()
+            dvals = dict(zip(list(vals['index']),list(vals[0])))
+            dffaux.loc[dffaux['Start_Position'] == i,'t_alt_count_y'] = dvals['t_alt_count_y']
+            dffaux.loc[dffaux['Start_Position'] == i,'t_alt_count_x'] = dvals['t_alt_count_x']
+        #Remove all variants with duplicated indels
+        combinedfile = combinedfile.loc[(~combinedfile['ShortVariantID_y'].isin(variants))]
+
+        # Add unique indel variants with new values
+        combinedfile = pd.concat([combinedfile, dffaux])
+        combinedfile = combinedfile.sort_values(by='Start_Position', ascending = True)
+        # Recalculate TumorVAF
+        combinedfile['TumorVAF_y'] = combinedfile['t_alt_count_y'] / (combinedfile['t_ref_count_y'] + combinedfile['t_alt_count_y'])
+        combinedfile['TumorVAF_x'] = combinedfile['t_alt_count_x'] / (combinedfile['t_ref_count_x'] + combinedfile['t_alt_count_x'])
 
     # Final annotation
-    final_result = combinedfile.loc[:,['Tumor_Sample_Barcode_y','Matched_Norm_Sample_Barcode_y','Chromosome',
+    '''final_result = combinedfile.loc[:,['Tumor_Sample_Barcode_y','Matched_Norm_Sample_Barcode_y','Chromosome',
         'Start_Position','Reference_Allele','Tumor_Seq_Allele2','Variant_Classification','Hugo_Symbol','EXON',
         'n_depth_y','t_depth_y','t_ref_count_y','t_alt_count_y']]
     final_result.columns = ['Sample','NormalUsed','Chrom','Start','Ref','Alt','VariantClass','Gene','Exon',
-        'N_TotalDepth','T_TotalDepth','T_RefCount','T_AltCount']
+        'N_TotalDepth','T_TotalDepth','T_RefCount','T_AltCount']'''
+
+    # Final annotations
+    final_result = combinedfile.loc[:,['Tumor_Sample_Barcode_y','Matched_Norm_Sample_Barcode_y','Chromosome',
+        'Start_Position','Reference_Allele','Tumor_Seq_Allele2','Variant_Classification','Hugo_Symbol','EXON',
+        'n_depth_y','t_depth_y','t_ref_count_y','t_alt_count_y', 'TumorVAF_y',  't_ref_fwd','t_alt_fwd','t_ref_rev','t_alt_rev', 'n_ref_count_y','n_alt_count_y', 'NormalVAF_y' ,'n_ref_fwd','n_alt_fwd','n_ref_rev', 'n_alt_rev','n_depth_x','t_depth_x','t_ref_count_x','t_alt_count_x','n_ref_count_x','n_alt_count_x', 'TumorVAF_x', 't_ref_forward', 't_alt_forward', 't_ref_reverse', 't_alt_reverse',  'n_ref_count_x','n_alt_count_x', 'NormalVAF_x','n_ref_forward', 'n_alt_forward', 'n_ref_reverse', 'n_alt_reverse']]
+    final_result.columns = ['Sample','NormalUsed','Chrom','Start','Ref','Alt','VariantClass','Gene','Exon',
+        'N_TotalDepth','T_TotalDepth','T_RefCount','T_AltCount', 'TumorVAF', 'T_Ref_fwd','T_Alt_fwd','T_Ref_rev','T_Alt_rev',  'N_RefCount','N_AltCount', 'NormalVAF','N_Ref_fwd','N_Alt_fwd','N_Ref_rev','N_Alt_rev', 'N_TotalDepth_mutect','T_TotalDepth_mutect','T_RefCount_mutect','T_AltCount_mutect','N_RefCount_mutect','N_AltCount_mutect', 'TumorVAF_mutect', 'T_Ref_fwd_mutect','T_Alt_fwd_mutect','T_Ref_rev_mutect','T_Alt_rev_mutect',  'N_RefCount_mutect','N_AltCount_mutect', 'NormalVAF_mutect', 'N_Ref_fwd_mutect','N_Alt_fwd_mutect','N_Ref_rev_mutect','N_Alt_rev_mutect']
 
     # output the fillout results
     final_result.to_csv(saveasthis,sep = '\t',na_rep='NA',index=False)
@@ -333,9 +364,14 @@ if __name__ == "__main__":
     print("Miminum number of reads mapping to forward and reverse strand to call mutation of " + str(minstrand))
 
     # Filtering of cells
-    variant_calling(datadir,libraryid,reffile,genome,minmapq,minbq,minstrand, workingdir, vepcache)
-    #variant_processing(libraryid,resultsdir)
+    #variant_calling(datadir,libraryid,reffile,genome,minmapq,minbq,minstrand, workingdir, vepcache)
+    variant_processing(libraryid,resultsdir)
     #runhaplogrep(datadir,libraryid,reffile, workingdir, resultsdir)
+
+
+
+
+
     #processfillout(libraryid, resultsdir)
     #genmaster(libraryid,reffile,resultsdir)
 
